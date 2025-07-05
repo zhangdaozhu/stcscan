@@ -5,12 +5,8 @@ use axum::{    extract::{Path, State},
     Router,
 };
 use dashmap::DashMap;
-use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::thread::sleep;
-use std::time::{Duration, Instant};
-use reqwest::Error;
+use std::time::{ Instant};
 use tokio::net::TcpListener;
 
 // region: --- Data Structures
@@ -154,16 +150,13 @@ async fn main() {
     let blocks_cache = DashMap::<u64, Block>::new();
     let transactions_cache = DashMap::<String, Transaction>::new();
 
-    println!(
-        "Starting to fetch and cache data for {} blocks...",
-        BLOCKS_TO_FETCH
-    );
+    println!("Starting to fetch and cache data for {BLOCKS_TO_FETCH} blocks...");
     let start_time = Instant::now();
 
     //从1开始取交易，
     for block_height in 1..BLOCKS_TO_FETCH {
 
-        let block_res = fetch_block(block_height).await;
+        let block_res = fetch_block(API_BASE_URL, block_height).await;
         match block_res {
             Ok(block) => {
                 let tx_hashes: Vec<String> = block
@@ -176,17 +169,13 @@ async fn main() {
                 //取出所有交易hash，再查交易详细
                 for tx_hash in tx_hashes.iter() {
 
-                    let tx_res = fetch_transaction(&tx_hash).await;
+                    let tx_res = fetch_transaction(API_BASE_URL, tx_hash).await;
                     match tx_res {
                         Ok(tx) => {
                             transactions_cache.insert((&tx_hash).to_string(), tx);
                         }
-                        Err(txErr) => {
-                            println!(
-                                "fetch transaction hash {},error {}",
-                                tx_hash,
-                                txErr
-                            );
+                        Err(tx_err) => {
+                            println!("fetch transaction hash {tx_hash},error {tx_err}");
                             return;
                         }
                     }
@@ -194,11 +183,7 @@ async fn main() {
                 blocks_cache.insert(block_height, block);
             }
             Err(err) => {
-                println!(
-                    "fetch block height {},error {}",
-                    block_height,
-                    err
-                );
+                println!("fetch block height {block_height},error {err}");
                 return;
             }
         }
@@ -232,16 +217,16 @@ async fn main() {
 }
 
 // 根据区块号查区块，会超时或者失败，加了重拾10次，如果还不行，那就是结构定义不对
-async fn fetch_block(block_height: u64) -> Result<Block, reqwest::Error> {
-    for n in 1..10 {
-        let url = format!("{}/block/main/height/{}", API_BASE_URL, block_height);
+async fn fetch_block(base_url: &str, block_height: u64) -> Result<Block, reqwest::Error> {
+    for _n in 1..10 {
+        let url = format!("{base_url}/block/main/height/{block_height}");
         let response = reqwest::get(&url).await;
         match response {
             Ok(res) => {
                 return res.json::< crate::Block >().await
             }
             Err(err) => {
-                println!("fetch block error {}",err);
+                println!("fetch block error {err}");
                 // sleep(Duration::from_millis(2))
             }
         }
@@ -251,16 +236,16 @@ async fn fetch_block(block_height: u64) -> Result<Block, reqwest::Error> {
 }
 
 // 交易hash查查询交易，会超时或者失败，加了重拾10次，如果还不行，那就是结构定义不对
-async fn fetch_transaction(txn_hash: &str) -> Result<Transaction, reqwest::Error> {
-    for n in 1..10 {
-        let url = format!("{}/transaction/main/hash/{}", API_BASE_URL, txn_hash);
+async fn fetch_transaction(base_url: &str, txn_hash: &str) -> Result<Transaction, reqwest::Error> {
+    for _n in 1..10 {
+        let url = format!("{base_url}/transaction/main/hash/{txn_hash}");
         let response = reqwest::get(&url).await;
         match response {
             Ok(res) => {
                 return res.json::< crate::Transaction >().await
             }
             Err(err) => {
-                println!("fetch transaction error {}",err);
+                println!("fetch transaction error {err}");
 
             }
         }
@@ -291,4 +276,176 @@ async fn get_transaction_handler(
         Some(txn) => Ok(Json(txn.clone())),
         None => Err(StatusCode::NOT_FOUND),
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::util::ServiceExt;
+    use serde_json::json;
+
+    // 辅助函数：创建一个用于测试的 AppState，其中包含预置的区块和交易数据。
+    fn create_test_app_state() -> AppState {
+        let blocks = DashMap::new();
+        let transactions = DashMap::new();
+
+        // Mock Block
+        let mock_block = Block {
+            header: BlockHeader {
+                author: "0x1".to_string(),
+                author_auth_key: None,
+                block_hash: "0xabc".to_string(),
+                body_hash: "0xdef".to_string(),
+                chain_id: 1,
+                nonce: 123,
+                timestamp: 1234567890,
+                difficulty: "100".to_string(),
+                extra: "".to_string(),
+                gas_used: 1000,
+                number: 100,
+                parent_hash: "0xparent".to_string(),
+                state_root: "0xstateroot".to_string(),
+                txn_accumulator_root: "0xtxnroot".to_string(),
+            },
+            uncles: vec![],
+            body: BlockBody {
+                full: vec![TransactionStub {
+                    transaction_hash: "0x123".to_string(),
+                }],
+            },
+        };
+
+        // Mock Transaction
+        let mock_transaction = Transaction {
+            _id: None,
+            block_hash: "0xabc".to_string(),
+            block_number: "100".to_string(),
+            event_root_hash: "0xeventroot".to_string(),
+            events: vec![],
+            gas_used: "500".to_string(),
+            state_root_hash: "0xstateroot".to_string(),
+            status: "Executed".to_string(),
+            timestamp: 1234567890,
+            transaction_global_index: 1,
+            transaction_hash: "0x123".to_string(),
+            transaction_index: 0,
+            transaction_type: "UserTransaction".to_string(),
+            user_transaction: UserTransaction {
+                transaction_hash: "0x123".to_string(),
+                authenticator: Authenticator {
+                    ed25519: Some(Ed25519 {
+                        public_key: "0xpubkey".to_string(),
+                        signature: "0xsig".to_string(),
+                    }),
+                },
+                raw_txn: RawTxn {
+                    chain_id: 1,
+                    decoded_payload: "".to_string(),
+                    expiration_timestamp_secs: "1234567890".to_string(),
+                    gas_token_code: "STC".to_string(),
+                    gas_unit_price: "1".to_string(),
+                    max_gas_amount: "10000".to_string(),
+                    payload: "".to_string(),
+                    sender: "0xsender".to_string(),
+                    sequence_number: "1".to_string(),
+                    transaction_hash: "0x123".to_string(),
+                },
+            },
+        };
+
+        blocks.insert(100, mock_block);
+        transactions.insert("0x123".to_string(), mock_transaction);
+
+        AppState {
+            blocks,
+            transactions,
+        }
+    }
+
+    // 测试 get_block_handler：当区块存在时，应返回 HTTP 200 OK。
+    #[tokio::test]
+    async fn test_get_block_handler_found() {
+        let app_state = create_test_app_state();
+        let app = Router::new()
+            .route("/block/:block_height", get(get_block_handler))
+            .with_state(app_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/block/100")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // 测试 get_block_handler：当区块不存在时，应返回 HTTP 404 Not Found。
+    #[tokio::test]
+    async fn test_get_block_handler_not_found() {
+        let app_state = create_test_app_state();
+        let app = Router::new()
+            .route("/block/:block_height", get(get_block_handler))
+            .with_state(app_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/block/999") // 使用一个不存在的区块号
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // 测试 get_transaction_handler：当交易存在时，应返回 HTTP 200 OK。
+    #[tokio::test]
+    async fn test_get_transaction_handler_found() {
+        let app_state = create_test_app_state();
+        let app = Router::new()
+            .route("/transaction/:txn_hash", get(get_transaction_handler))
+            .with_state(app_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/transaction/0x123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // 测试 get_transaction_handler：当交易不存在时，应返回 HTTP 404 Not Found。
+    #[tokio::test]
+    async fn test_get_transaction_handler_not_found() {
+        let app_state = create_test_app_state();
+        let app = Router::new()
+            .route("/transaction/:txn_hash", get(get_transaction_handler))
+            .with_state(app_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/transaction/0xnonexistent") // 使用一个不存在的交易哈希
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
 }
